@@ -3,6 +3,16 @@ const dayjs = require('dayjs');
 const Member = require('../models/member.model');
 const Attendance = require('../models/attendance.model');
 const { success, error } = require('../utils/response');
+const PdfPrinter = require('pdfmake');
+const fonts = {
+  Roboto: {
+    normal: 'fonts/Roboto-Regular.ttf',
+    bold: 'fonts/Roboto-Bold.ttf',
+    italics: 'fonts/Roboto-Italic.ttf',
+    bolditalics: 'fonts/Roboto-BoldItalic.ttf'
+  }
+};
+const printer = new PdfPrinter(fonts);
 
 // Get dashboard stats
 exports.getDashboardStats = asyncHandler(async (req, res) => {
@@ -328,41 +338,176 @@ exports.getAnalyticsReport = asyncHandler(async (req, res) => {
 
 // Export report
 exports.exportReport = asyncHandler(async (req, res) => {
-  const { type, startDate, endDate, format = 'csv' } = req.query;
+  const { type, startDate, endDate, format = 'json' } = req.query;
   const start = startDate ? dayjs(startDate) : dayjs().subtract(30, 'day');
   const end = endDate ? dayjs(endDate) : dayjs();
 
   let data;
-  switch (type) {
-    case 'attendance':
-      data = await Attendance.find({
-        checkIn: { $gte: start.toDate(), $lte: end.toDate() }
-      }).populate('member', 'memberId fullName email');
-      break;
-    case 'members':
-      data = await Member.find().select('-__v');
-      break;
-    default:
-      return error(res, 'Invalid report type', 400);
+  if (type === 'analytics') {
+    // Get analytics data
+    const dailyTrends = await Attendance.aggregate([
+      {
+        $match: {
+          checkIn: {
+            $gte: start.startOf('day').toDate(),
+            $lte: end.endOf('day').toDate()
+          }
+        }
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$checkIn' } },
+          total: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+    const departmentDistribution = await Member.aggregate([
+      {
+        $match: {
+          department: { $ne: 'None' },
+          status: 'active'
+        }
+      },
+      {
+        $group: {
+          _id: '$department',
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { count: -1 } }
+    ]);
+    data = { dailyTrends, departmentDistribution };
+  } else {
+    switch (type) {
+      case 'attendance':
+        data = await Attendance.find({
+          checkIn: { $gte: start.toDate(), $lte: end.toDate() }
+        }).populate('member', 'memberId fullName email');
+        break;
+      case 'members':
+        data = await Member.find().select('-__v');
+        break;
+      default:
+        return error(res, 'Invalid report type', 400);
+    }
   }
 
-  if (format === 'csv') {
-    // Format data for CSV
-    const formattedData = data.map(record => {
-      if (type === 'attendance') {
-        return {
-          date: dayjs(record.checkIn).format('YYYY-MM-DD'),
-          memberId: record.member.memberId,
-          memberName: record.member.fullName,
-          checkIn: dayjs(record.checkIn).format('HH:mm:ss'),
-          checkOut: record.checkOut ? dayjs(record.checkOut).format('HH:mm:ss') : '',
-          duration: record.duration
-        };
-      }
-      return record.toObject();
-    });
-
-    return success(res, { data: formattedData, format: 'csv' });
+  if (format === 'pdf') {
+    let docDefinition;
+    if (type === 'attendance') {
+      const body = [
+        ['Member ID', 'Full Name', 'Email', 'Check In', 'Check Out', 'Duration', 'Status'],
+        ...data.map(record => [
+          record.member.memberId,
+          record.member.fullName,
+          record.member.email,
+          dayjs(record.checkIn).format('YYYY-MM-DD HH:mm'),
+          record.checkOut ? dayjs(record.checkOut).format('YYYY-MM-DD HH:mm') : '',
+          record.duration != null ? record.duration.toString() : '',
+          record.status
+        ])
+      ];
+      docDefinition = {
+        content: [
+          { text: 'Attendance Report', style: 'header' },
+          {
+            table: {
+              headerRows: 1,
+              widths: [60, 100, 120, 80, 80, 50, 50],
+              body
+            },
+            layout: 'lightHorizontalLines',
+            style: 'tableContent'
+          }
+        ],
+        styles: {
+          header: { fontSize: 18, bold: true, margin: [0, 0, 0, 10] },
+          tableContent: { fontSize: 9 }
+        }
+      };
+    } else if (type === 'members') {
+      const body = [
+        ['Member ID', 'Full Name', 'Email', 'Membership Type', 'Status', 'Total Visits', 'Last Visit'],
+        ...data.map(record => [
+          record.memberId,
+          record.fullName,
+          record.email,
+          record.membershipType,
+          record.status,
+          record.totalVisits != null ? record.totalVisits.toString() : '',
+          record.lastVisit ? dayjs(record.lastVisit).format('YYYY-MM-DD HH:mm:ss') : ''
+        ])
+      ];
+      docDefinition = {
+        content: [
+          { text: 'Members Report', style: 'header' },
+          {
+            table: {
+              headerRows: 1,
+              widths: [60, 100, 120, 80, 60, 50, 80],
+              body
+            },
+            layout: 'lightHorizontalLines',
+            style: 'tableContent'
+          }
+        ],
+        styles: {
+          header: { fontSize: 18, bold: true, margin: [0, 0, 0, 10] },
+          tableContent: { fontSize: 9 }
+        }
+      };
+    } else if (type === 'analytics') {
+      const trendsBody = [
+        ['Date', 'Total'],
+        ...(data.dailyTrends.length > 0
+          ? data.dailyTrends.map(row => [row._id, row.total])
+          : [['No data available', '']])
+      ];
+      const deptBody = [
+        ['Department', 'Count'],
+        ...(data.departmentDistribution.length > 0
+          ? data.departmentDistribution.map(row => [row._id, row.count])
+          : [['No data available', '']])
+      ];
+      docDefinition = {
+        content: [
+          { text: 'Analytics Report', style: 'header' },
+          { text: 'Daily Trends', style: 'subheader' },
+          {
+            table: {
+              headerRows: 1,
+              widths: [100, 60],
+              body: trendsBody
+            },
+            layout: 'lightHorizontalLines',
+            style: 'tableContent',
+            margin: [0, 0, 0, 20]
+          },
+          { text: 'Department Distribution', style: 'subheader' },
+          {
+            table: {
+              headerRows: 1,
+              widths: [120, 60],
+              body: deptBody
+            },
+            layout: 'lightHorizontalLines',
+            style: 'tableContent'
+          }
+        ],
+        styles: {
+          header: { fontSize: 18, bold: true, margin: [0, 0, 0, 10] },
+          subheader: { fontSize: 14, bold: true, margin: [0, 10, 0, 5] },
+          tableContent: { fontSize: 9 }
+        }
+      };
+    }
+    const pdfDoc = printer.createPdfKitDocument(docDefinition);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${type}-report.pdf"`);
+    pdfDoc.pipe(res);
+    pdfDoc.end();
+    return;
   }
 
   // Default to JSON format

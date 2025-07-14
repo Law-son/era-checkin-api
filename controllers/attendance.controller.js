@@ -3,6 +3,9 @@ const dayjs = require('dayjs');
 const Member = require('../models/member.model');
 const Attendance = require('../models/attendance.model');
 const { success, error, paginate } = require('../utils/response');
+const PDFDocument = require('pdfkit');
+const stream = require('stream');
+const PDFTable = require('pdfkit-table');
 
 // Get all attendance records (with pagination)
 exports.getAllAttendance = asyncHandler(async (req, res) => {
@@ -313,25 +316,66 @@ exports.exportAttendance = asyncHandler(async (req, res) => {
   const start = startDate ? dayjs(startDate) : dayjs().subtract(30, 'day');
   const end = endDate ? dayjs(endDate) : dayjs();
 
-  const attendance = await Attendance.find({
-    checkIn: { $gte: start.toDate(), $lte: end.toDate() }
-  }).populate('member', 'memberId fullName email');
+  try {
+    const attendance = await Attendance.find({
+      checkIn: { $gte: start.toDate(), $lte: end.toDate() }
+    }).populate('member', 'memberId fullName email');
 
-  if (format === 'csv') {
-    // Format data for CSV
-    const csvData = attendance.map(record => ({
-      memberId: record.member.memberId,
-      fullName: record.member.fullName,
-      email: record.member.email,
-      checkIn: dayjs(record.checkIn).format('YYYY-MM-DD HH:mm:ss'),
-      checkOut: record.checkOut ? dayjs(record.checkOut).format('YYYY-MM-DD HH:mm:ss') : '',
-      duration: record.duration,
-      status: record.status
-    }));
+    if (format === 'pdf') {
+      // Generate PDF with table
+      const doc = new PDFDocument({ margin: 30, size: 'A4' });
+      const passThrough = new stream.PassThrough();
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="attendance-report.pdf"');
+      doc.pipe(passThrough);
 
-    return success(res, { data: csvData, format: 'csv' });
+      // Prepare table data
+      const table = {
+        title: 'Attendance Report',
+        headers: [
+          'Member ID',
+          'Full Name',
+          'Email',
+          'Check In',
+          'Check Out',
+          'Duration',
+          'Status'
+        ],
+        rows: attendance.map(record => [
+          record.member.memberId,
+          record.member.fullName,
+          record.member.email,
+          dayjs(record.checkIn).format('YYYY-MM-DD HH:mm'),
+          record.checkOut ? dayjs(record.checkOut).format('YYYY-MM-DD HH:mm') : '',
+          record.duration != null ? record.duration.toString() : '',
+          record.status
+        ])
+      };
+
+      await doc.table(table, { width: 540 });
+      doc.end();
+      passThrough.pipe(res);
+      return;
+    }
+
+    if (format === 'csv') {
+      // Format data for CSV
+      const csvData = attendance.map(record => ({
+        memberId: record.member.memberId,
+        fullName: record.member.fullName,
+        email: record.member.email,
+        checkIn: dayjs(record.checkIn).format('YYYY-MM-DD HH:mm:ss'),
+        checkOut: record.checkOut ? dayjs(record.checkOut).format('YYYY-MM-DD HH:mm:ss') : '',
+        duration: record.duration,
+        status: record.status
+      }));
+
+      return success(res, { data: csvData, format: 'csv' });
+    }
+
+    // Always return data under 'data' key for JSON
+    return success(res, { data: attendance });
+  } catch (err) {
+    return error(res, 'Failed to export attendance', 500);
   }
-
-  // Default to JSON format
-  return success(res, { attendance });
 }); 

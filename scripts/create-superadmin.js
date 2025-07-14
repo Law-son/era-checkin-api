@@ -5,7 +5,7 @@ const connection = require('../config/db');
 const createSuperAdmin = async () => {
   try {
     // Check if super admin already exists
-    const existingAdmin = await Admin.findOne({ email: 'superadmin@gmail.com' });
+    const existingAdmin = await Admin.findOne({ email: 'superadmin@era.com' });
     
     if (existingAdmin) {
       console.log('Super admin already exists!');
@@ -14,8 +14,8 @@ const createSuperAdmin = async () => {
 
     // Create super admin
     const superAdmin = await Admin.create({
-      email: 'superadmin@gmail.com',
-      password: 'Admin@123',
+      email: 'superadmin@era.com',
+      password: 'Super@era25',
       fullName: 'Super Admin',
       role: 'superadmin',
       status: 'active'
